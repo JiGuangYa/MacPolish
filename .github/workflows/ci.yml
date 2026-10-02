@@ -30,3 +30,12 @@ jobs:
 
       - name: Run verification suite
         run: swift run MacPolishVerification
+
+      - name: Verify optimized build
+        run: swift run -c release MacPolishVerification
+
+      - name: Verify release failure handling
+        run: python3 scripts/test_release_tools.py
+
+      - name: Package and verify universal release
+        run: ./scripts/package_release.sh

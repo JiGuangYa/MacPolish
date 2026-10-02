@@ -1,6 +1,7 @@
 import SwiftUI
 
 public struct AppCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject private var sessionController: CleaningSessionController
 
     public init(sessionController: CleaningSessionController) {
@@ -12,46 +13,43 @@ public struct AppCommands: Commands {
 
         CommandMenu(L10n.string(.menuCleaning)) {
             Button(L10n.string(.menuStartWholeMac)) {
-                sessionController.startCleaning(mode: .wholeMac)
+                sessionController.performPrimaryActionFromMenu(for: .wholeMac) {
+                    openWindow(id: AppWindowID.main)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }
             .keyboardShortcut("m", modifiers: [.command, .shift])
-            .disabled(sessionController.isCleaning)
+            .disabled(!sessionController.canStartWholeMac)
 
             Button(L10n.string(.menuStartScreenOnly)) {
                 sessionController.startCleaning(mode: .screenOnly)
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
-            .disabled(sessionController.isCleaning)
+            .disabled(!sessionController.canPerformPrimaryAction(for: .screenOnly))
 
-            Button(L10n.string(.menuStartKeyboardOnly)) {
-                sessionController.startCleaning(mode: .keyboardOnly)
+            Button(L10n.string(sessionController.keyboardPermissionPrimaryAction.titleKey)) {
+                sessionController.performPrimaryActionFromMenu(for: .keyboardOnly) {
+                    openWindow(id: AppWindowID.main)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }
             .keyboardShortcut("k", modifiers: [.command, .shift])
-            .disabled(sessionController.isCleaning || sessionController.keyboardPermissionState != .granted)
+            .disabled(sessionController.isCleaning || !sessionController.canPerformPrimaryAction(for: .keyboardOnly))
 
             Divider()
 
-            if sessionController.keyboardPermissionState == .notDetermined {
-                Button(L10n.string(.menuRequestKeyboardAccess)) {
-                    sessionController.requestKeyboardPermission()
-                }
+            if sessionController.activeMode == .screenOnly {
+                exitButton.keyboardShortcut(.escape, modifiers: [])
+            } else {
+                exitButton
             }
-
-            if sessionController.keyboardPermissionState == .denied {
-                Button(L10n.string(.menuOpenKeyboardSettings)) {
-                    sessionController.openKeyboardPermissionSettings()
-                }
-            }
-
-            if sessionController.keyboardPermissionState != .granted {
-                Divider()
-            }
-
-            Button(L10n.string(.menuExitCleaning)) {
-                sessionController.stopCleaning(trigger: .menuCommand)
-            }
-            .keyboardShortcut(.escape, modifiers: [])
-            .disabled(!sessionController.isCleaning)
         }
+    }
+
+    private var exitButton: some View {
+        Button(L10n.string(.menuExitCleaning)) {
+            sessionController.stopCleaning(trigger: .menuCommand)
+        }
+        .disabled(!sessionController.isCleaning)
     }
 }

@@ -5,29 +5,24 @@ import SwiftUI
 @main
 struct MacPolishApp: App {
     @NSApplicationDelegateAdaptor(MacPolishAppDelegate.self) private var appDelegate
-    @StateObject private var sessionController = CleaningSessionController()
+    @StateObject private var appSettings: AppSettings
+    @StateObject private var sessionController: CleaningSessionController
 
-    var body: some Scene {
-        WindowGroup(L10n.string(.appTitle)) {
-            MainView(sessionController: sessionController)
-        }
-        .windowResizability(.contentSize)
-        .defaultSize(width: 920, height: 470)
-        .commands {
-            AppCommands(sessionController: sessionController)
-        }
-        .onChange(of: scenePhase) { newPhase in
-            if newPhase == .active {
-                sessionController.refreshKeyboardPermissionState()
-            }
-        }
+    init() {
+        let settings = AppSettings()
+        _appSettings = StateObject(wrappedValue: settings)
+        _sessionController = StateObject(
+            wrappedValue: CleaningSessionController(appSettings: settings)
+        )
     }
 
-    @Environment(\.scenePhase) private var scenePhase
+    var body: some Scene {
+        MacPolishScenes(sessionController: sessionController, appSettings: appSettings)
+    }
 }
 
 final class MacPolishAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
     }
 }

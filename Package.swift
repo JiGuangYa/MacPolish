@@ -16,6 +16,10 @@ let package = Package(
         .executable(
             name: "MacPolishVerification",
             targets: ["MacPolishVerification"]
+        ),
+        .executable(
+            name: "MacPolishWindowVerification",
+            targets: ["MacPolishWindowVerification"]
         )
     ],
     targets: [
@@ -31,6 +35,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "MacPolishVerification",
+            dependencies: ["MacPolishKit"]
+        ),
+        .executableTarget(
+            name: "MacPolishWindowVerification",
             dependencies: ["MacPolishKit"]
         )
     ]

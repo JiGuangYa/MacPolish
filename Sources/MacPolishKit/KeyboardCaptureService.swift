@@ -5,11 +5,20 @@ import Foundation
 @MainActor
 public protocol KeyboardCapturing: AnyObject {
     var permissionState: KeyboardPermissionState { get }
+    var isCapturing: Bool { get }
+    var isSecureInputEnabled: Bool { get }
 
     func refreshPermissionState() -> KeyboardPermissionState
     func requestPermission() -> KeyboardPermissionState
-    func startCapturing() -> Bool
+    func probeCaptureAvailability() -> Bool
+    func startCapturing(for mode: CleaningMode, onEmergencyInput: @escaping @MainActor (EmergencyExitInput) -> Void) -> Bool
     func stopCapturing()
+}
+
+extension KeyboardCapturing {
+    public func startCapturing(for mode: CleaningMode) -> Bool {
+        startCapturing(for: mode, onEmergencyInput: { _ in })
+    }
 }
 
 @MainActor
@@ -19,7 +28,7 @@ public protocol KeyboardPermissionOpening {
 
 @MainActor
 public final class InputMonitoringSettingsOpener: KeyboardPermissionOpening {
-    private static let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!
+    private static let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
 
     public init() { }
 
@@ -32,116 +41,133 @@ public final class InputMonitoringSettingsOpener: KeyboardPermissionOpening {
 public final class SystemKeyboardCaptureService: KeyboardCapturing {
     public private(set) var permissionState: KeyboardPermissionState
 
+    public var isSecureInputEnabled: Bool { access.isSecureInputEnabled }
+
+    public var isCapturing: Bool {
+        activeMode != nil && !isSecureInputEnabled && eventTap?.isEnabled == true
+    }
+
     private let userDefaults: UserDefaults
+    private let access: KeyboardAccessChecking
+    private let tapFactory: KeyboardEventTapCreating
     private let requestedPermissionKey = "MacPolish.didRequestKeyboardPermission"
+    // CGEventType has no named NSSystemDefined case; raw 14 includes media keys.
+    private static let systemDefinedEventTypeRawValue: UInt32 = 14
+    private static let keyboardEventMask =
+        eventMask(forRawValue: CGEventType.keyDown.rawValue) |
+        eventMask(forRawValue: CGEventType.keyUp.rawValue) |
+        eventMask(forRawValue: CGEventType.flagsChanged.rawValue) |
+        eventMask(forRawValue: systemDefinedEventTypeRawValue)
 
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private var eventTap: (any KeyboardEventTap)?
+    private var activeMode: CleaningMode?
+    private var captureID: UUID?
+    private var onEmergencyInput: (@MainActor (EmergencyExitInput) -> Void)?
 
-    public init(userDefaults: UserDefaults = .standard) {
+    public convenience init(userDefaults: UserDefaults = .standard) {
+        self.init(userDefaults: userDefaults, access: SystemKeyboardAccess(), tapFactory: CoreGraphicsKeyboardEventTapFactory())
+    }
+
+    package init(userDefaults: UserDefaults, access: KeyboardAccessChecking, tapFactory: KeyboardEventTapCreating) {
         self.userDefaults = userDefaults
-        self.permissionState = Self.computePermissionState(
-            didRequestPermission: userDefaults.bool(forKey: requestedPermissionKey)
+        self.access = access
+        self.tapFactory = tapFactory
+        self.permissionState = access.isTrusted ? .granted : (
+            userDefaults.bool(forKey: "MacPolish.didRequestKeyboardPermission") ? .denied : .notDetermined
         )
     }
 
     public func refreshPermissionState() -> KeyboardPermissionState {
-        permissionState = Self.computePermissionState(
-            didRequestPermission: userDefaults.bool(forKey: requestedPermissionKey)
+        permissionState = access.isTrusted ? .granted : (
+            userDefaults.bool(forKey: requestedPermissionKey) ? .denied : .notDetermined
         )
         return permissionState
     }
 
     public func requestPermission() -> KeyboardPermissionState {
         userDefaults.set(true, forKey: requestedPermissionKey)
-
-        permissionState = CGRequestListenEventAccess() ? .granted : .denied
-        return permissionState
+        access.requestAccess()
+        return refreshPermissionState()
     }
 
-    public func startCapturing() -> Bool {
-        guard refreshPermissionState() == .granted else {
+    public func probeCaptureAvailability() -> Bool {
+        // Preflight must not install an event tap. Creation is checked only
+        // when starting a session, after the permission UI has settled.
+        refreshPermissionState() == .granted && !isSecureInputEnabled
+    }
+
+    public func startCapturing(for mode: CleaningMode, onEmergencyInput: @escaping @MainActor (EmergencyExitInput) -> Void) -> Bool {
+        guard mode != .screenOnly,
+              refreshPermissionState() == .granted,
+              !isSecureInputEnabled else {
+            stopCapturing()
             return false
         }
 
-        if eventTap != nil {
+        if isCapturing {
+            self.onEmergencyInput?(.reset)
+            self.onEmergencyInput = onEmergencyInput
+            activeMode = mode
             return true
         }
 
-        let eventMask =
-            CGEventMask(1 << CGEventType.keyDown.rawValue) |
-            CGEventMask(1 << CGEventType.keyUp.rawValue) |
-            CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+        stopCapturing()
+        self.onEmergencyInput = onEmergencyInput
+        activeMode = mode
+        let captureID = UUID()
+        self.captureID = captureID
 
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: eventMask,
-            callback: Self.eventTapCallback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
+        guard let tap = tapFactory.makeTap(eventsOfInterest: Self.keyboardEventMask, handler: { [weak self] type, event in
+            guard let self, self.captureID == captureID else { return Unmanaged.passUnretained(event) }
+            return self.handleEventTap(type: type, event: event)
+        }) else {
+            stopCapturing()
             return false
         }
-
-        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
-            return false
-        }
-
         eventTap = tap
-        runLoopSource = source
+        tap.enable()
 
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-
+        guard isCapturing else {
+            stopCapturing()
+            return false
+        }
         return true
     }
 
     public func stopCapturing() {
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-            runLoopSource = nil
-        }
-
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            eventTap = nil
-        }
-    }
-
-    private static let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
-        guard let userInfo else {
-            return Unmanaged.passUnretained(event)
-        }
-
-        let service = Unmanaged<SystemKeyboardCaptureService>
-            .fromOpaque(userInfo)
-            .takeUnretainedValue()
-
-        return service.handleEventTap(type: type, event: event)
+        activeMode = nil
+        captureID = nil
+        onEmergencyInput?(.reset)
+        onEmergencyInput = nil
+        eventTap?.invalidate()
+        eventTap = nil
     }
 
     private func handleEventTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
-            if let eventTap {
-                CGEvent.tapEnable(tap: eventTap, enable: true)
+            onEmergencyInput?(.reset)
+            if activeMode != nil && !isSecureInputEnabled && refreshPermissionState() == .granted {
+                eventTap?.enable()
             }
             return Unmanaged.passUnretained(event)
 
         case .keyDown, .keyUp, .flagsChanged:
-            return nil
+            if activeMode != nil, let input = EmergencyExitInput.from(type: type, event: event) {
+                onEmergencyInput?(input)
+            }
+            return activeMode == nil ? Unmanaged.passUnretained(event) : nil
 
         default:
+            if type.rawValue == Self.systemDefinedEventTypeRawValue, activeMode != nil {
+                onEmergencyInput?(.reset)
+                return nil
+            }
             return Unmanaged.passUnretained(event)
         }
     }
 
-    private static func computePermissionState(didRequestPermission: Bool) -> KeyboardPermissionState {
-        if CGPreflightListenEventAccess() {
-            return .granted
-        }
-
-        return didRequestPermission ? .denied : .notDetermined
+    private static func eventMask(forRawValue rawValue: UInt32) -> CGEventMask {
+        CGEventMask(1) << Int(rawValue)
     }
 }
