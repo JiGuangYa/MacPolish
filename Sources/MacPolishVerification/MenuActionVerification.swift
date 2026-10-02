@@ -55,7 +55,7 @@ enum MenuActionVerification {
             require(fixture.keyboard.startCapturingCallCount == 0 && fixture.keyboard.requestPermissionCallCount == 0,
                 "Expected pending Whole Mac cleaning not to capture input or ask for permission")
             fixture.window.isReadyForKeyboardCleaning = true
-            await pause(90)
+            await waitForWindowOpeningToFinish(fixture.controller)
             require(fixture.controller.activeMode == .wholeMac && !fixture.controller.isOpeningMainWindow,
                 "Expected the remembered Whole Mac intent to start Whole Mac after the window becomes ready")
             require(fixture.controller.activeKeyboardProtection == (permission == .granted ? .global : .local),
@@ -119,7 +119,7 @@ enum MenuActionVerification {
         await pause(70)
         require(!fixture.controller.isCleaning, "Expected elapsed time alone not to imply window readiness")
         fixture.window.isReadyForKeyboardCleaning = true
-        await pause(90)
+        await waitForWindowOpeningToFinish(fixture.controller)
         require(fixture.controller.activeMode == .keyboardOnly && !fixture.controller.isOpeningMainWindow,
             "Expected a window that becomes ready later to start the requested session")
         require(fixture.keyboard.startCapturingCallCount == 1, "Expected readiness polling to start only once")
@@ -130,7 +130,7 @@ enum MenuActionVerification {
         let fixture = MenuActionFixture(timeout: 0.06)
         fixture.window.isReadyForKeyboardCleaning = false
         fixture.controller.performPrimaryActionFromMenu(for: .keyboardOnly) { }
-        await pause(150)
+        await waitForWindowOpeningToFinish(fixture.controller)
         require(!fixture.controller.isOpeningMainWindow && !fixture.controller.isCleaning,
             "Expected opening timeout to leave the app idle")
         require(fixture.controller.notice == .mainWindowOpeningFailed && fixture.keyboard.startCapturingCallCount == 0,
@@ -170,7 +170,7 @@ enum MenuActionVerification {
         fixture.controller.performPrimaryActionFromMenu(for: .keyboardOnly) { }
         fixture.keyboard.permissionState = .denied
         fixture.window.isReadyForKeyboardCleaning = true
-        await pause(90)
+        await waitForWindowOpeningToFinish(fixture.controller)
         require(!fixture.controller.isCleaning && fixture.keyboard.startCapturingCallCount == 0,
             "Expected permission to be rechecked when the window becomes ready")
         require(fixture.settingsOpener.openCallCount == 1, "Expected the updated permission state to choose the recovery action")
@@ -180,7 +180,7 @@ enum MenuActionVerification {
         secure.controller.performPrimaryActionFromMenu(for: .keyboardOnly) { }
         secure.keyboard.isSecureInputEnabled = true
         secure.window.isReadyForKeyboardCleaning = true
-        await pause(90)
+        await waitForWindowOpeningToFinish(secure.controller)
         require(!secure.controller.isCleaning && secure.keyboard.startCapturingCallCount == 0,
             "Expected Secure Input acquired while opening to prevent capture")
         require(secure.controller.keyboardProtectionAvailability == .blockedBySecureInput,
@@ -236,7 +236,7 @@ enum MenuActionVerification {
         request.keyboard.permissionState = .granted
         request.keyboard.probeCaptureAvailabilityResult = true
         request.window.isReadyForKeyboardCleaning = true
-        await pause(90)
+        await waitForWindowOpeningToFinish(request.controller)
         require(!request.controller.isCleaning && request.keyboard.startCapturingCallCount == 0 && request.keyboard.requestPermissionCallCount == 0,
             "Expected newly granted access not to turn a permission request into capture or another prompt")
 
@@ -248,7 +248,7 @@ enum MenuActionVerification {
         refresh.controller.performPrimaryActionFromMenu(for: .keyboardOnly) { }
         refresh.keyboard.probeCaptureAvailabilityResult = true
         refresh.window.isReadyForKeyboardCleaning = true
-        await pause(90)
+        await waitForWindowOpeningToFinish(refresh.controller)
         require(refresh.controller.keyboardProtectionAvailability == .ready && !refresh.controller.isCleaning,
             "Expected Refresh to display readiness without silently starting keyboard cleaning")
         require(refresh.keyboard.startCapturingCallCount == 0, "Expected refresh intent never to capture the keyboard")
@@ -295,6 +295,16 @@ enum MenuActionVerification {
         await pause(40)
         require(resolved.isEmpty, "Expected removal to invalidate a queued window callback")
         require(windows.allSatisfy { !$0.isVisible }, "Expected attachment verification to leave desktop windows hidden")
+    }
+
+    private static func waitForWindowOpeningToFinish(_ controller: CleaningSessionController) async {
+        // CI may schedule the readiness task later than a fixed 90 ms pause.
+        // Observe its actual completion; never force the controller to advance.
+        let deadline = ProcessInfo.processInfo.systemUptime + 1
+        while controller.isOpeningMainWindow && ProcessInfo.processInfo.systemUptime < deadline {
+            await pause(10)
+        }
+        require(!controller.isOpeningMainWindow, "Expected the pending window request to complete within one second")
     }
 
     private static func pause(_ milliseconds: Int64) async {
